@@ -1,0 +1,125 @@
+#!/usr/bin/env Rscript
+
+# Run ArchR to generate metacell information for running ChromaFold
+#
+# Installation of ArchR
+# install.packages("Rcpp", dependencies = TRUE) # nolint
+# if (!requireNamespace("devtools", quietly = TRUE)) install.packages("devtools") # nolint
+# install.packages("devtools") # nolint
+# if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager") # nolint
+# devtools::install_github("GreenleafLab/ArchR", ref="master", repos = BiocManager::repositories()) # nolint
+# library(ArchR) # nolint
+# ArchR::installExtraPackages() # nolint
+#
+# Usage
+# screen
+# source /miniconda3/etc/profile.d/conda.sh
+# conda activate chromafold_env
+# cd /chromafold/scripts
+#
+# Rscript /chromafold/scripts/ArchR_preparation.R \
+# "name_prefix" \
+# "/chromafold/data/test_input/archr_data" \
+# "/fragments.tsv.gz" \
+# "mm10" \
+# min_cells
+library(ArchR)
+library(tidyr)
+
+args <- commandArgs(trailing = TRUE)
+
+#####################################
+#      Step 0. Initial set-ups      #
+#####################################
+
+#1. Initial set-up
+sample_name <- args[1]
+archr_path <- args[2]
+input_path <- args[3]
+genome_assembly <- args[4]
+cell_number <- args[5]
+
+setwd(archr_path)
+
+#2. Hyper-parameters
+# addArchRGenome("mm10")  # nolint
+addArchRGenome(genome_assembly)
+addArchRThreads(threads = 1)
+tile_mat_params <- list()
+tile_mat_params$tileSize <- 500
+
+#########################################
+#      Step 1. Load fragmens files      #
+#########################################
+
+#1. Load fragments files
+
+ArrowFiles <- createArrowFiles( # nolint
+    inputFiles = input_path,
+    sampleNames = sample_name,
+    TileMatParams = tile_mat_params,
+    filterTSS = 4, #Dont set this too high because you can always increase later
+    filterFrags = 1000,
+    addTileMat = TRUE,
+    addGeneScoreMat = FALSE
+)
+
+print("Finished creating ArrowFiles")
+
+#2. Create archr project
+proj <- ArchRProject(
+    ArrowFiles = c(paste0(archr_path, "/", sample_name, ".arrow")),
+    # outputDirectory = paste0(archr_path, "/archr_out/"), #nolint
+    outputDirectory = paste0(archr_path, "/"),
+    copyArrows = FALSE
+)
+
+print("Finished creating Archr project")
+
+# subsampling of cells
+#cell_number = 3057
+if (cell_number != 0 && nCells(proj) > cell_number) {
+    message("Subsampling to ", cell_number, " cells")
+    cells <- sample(1:nCells(proj), cell_number, replace = FALSE)
+    proj <- proj[cells, ]   # subset ArchRProject
+} else {
+    message("No subsampling — only ", nCells(proj), " cells")
+}
+
+#3. Run lsi
+proj <- addIterativeLSI(
+  ArchRProj = proj, useMatrix = "TileMatrix",
+  name = "IterativeLSI", iterations = 2,
+  clusterParams = list(
+    resolution = c(0.2), sampleCells = 10000, n.start = 10
+  ),
+  varFeatures = 25000, dimsToUse = 1:30
+)
+
+print("Finished running lsi")
+
+#3.1. Clustering
+proj <- addClusters(
+    input = proj, reducedDims = "IterativeLSI",
+    method = "Seurat", name = "Clusters",
+    resolution = 2, force = TRUE
+)
+
+print("Finished clustering")
+
+#3.2. tsne
+# proj <- addTSNE(
+#     ArchRProj = proj, reducedDims = "IterativeLSI",
+#     name = "TSNE", perplexity = 30
+# )
+
+####################################
+#      Step 2. Save all files      #
+####################################
+
+#1. Save
+final_bc <- rownames(proj@cellColData)
+write.csv(final_bc, file = paste0(archr_path,  "/archr_filtered_barcode.csv"))
+lsi <- getReducedDims(proj)
+write.csv(lsi, file = paste0(archr_path, "/archr_filtered_lsi.csv"))
+saveArchRProject(ArchRProj = proj, outputDirectory = archr_path, load = FALSE)
